@@ -32,57 +32,23 @@ cargo build --release
 cargo run --release
 ```
 
-## Visualizing Async State Machines
+## Async State Machines
 
-The Rust compiler transforms each `async fn` into a state machine. You can inspect these
-with the tools below.
+The Rust compiler transforms each `async fn` into a state machine (coroutine).
+See **[docs/async-state-machines.md](docs/async-state-machines.md)** for a
+detailed walkthrough of how the `counter` task is compiled, including the
+generated MIR control-flow graphs for all three tasks.
 
-### Expand macros (see generated state machine structs)
-
-```bash
-# Install cargo-expand
-cargo install cargo-expand
-
-# Show the fully expanded source (requires nightly)
-cargo +nightly expand --release
-```
-
-### Dump MIR with state-machine graphviz diagrams
+### Quick: generate the graphs yourself
 
 ```bash
-# Generate MIR .dot files for all functions (requires nightly)
-RUSTFLAGS="-Z dump-mir=all -Z dump-mir-graphviz" cargo +nightly build --release
+# Requires: rustup toolchain install nightly, apt install graphviz
+cargo +nightly rustc --release -- -Z dump-mir=all -Z dump-mir-graphviz
 
-# The .dot files land in ./mir_dump/
-# Render a specific task's state machine to SVG:
-dot -Tsvg mir_dump/nrf_example.counter.-------.renumber.0.mir.dot -o counter.svg
-dot -Tsvg mir_dump/nrf_example.processor.-------.renumber.0.mir.dot -o processor.svg
-dot -Tsvg mir_dump/nrf_example.led_controller.-------.renumber.0.mir.dot -o led_controller.svg
-```
-
-> **Tip:** The filenames in `mir_dump/` vary by pass. List them with
-> `ls mir_dump/*counter*` and pick the pass you want to inspect
-> (e.g. `built`, `renumber`, `optimized`).
-
-### Dump LLVM-IR
-
-```bash
-# Emit LLVM-IR to target/<target>/release/deps/*.ll
-cargo rustc --release -- --emit=llvm-ir
-
-# Find the generated file
-ls target/thumbv7em-none-eabihf/release/deps/*.ll
-```
-
-### View assembly
-
-```bash
-# Install cargo-asm (works on stable)
-cargo install cargo-asm
-
-# List available symbols
-cargo asm --release --lib
-
-# Disassemble a specific function
-cargo asm --release --lib nrf_example::counter
+dot -Tsvg "mir_dump/nrf_example.__counter_task-{closure#0}.-------.coroutine_resume.0.dot" \
+    -o docs/counter_state_machine.svg
+dot -Tsvg "mir_dump/nrf_example.__processor_task-{closure#0}.-------.coroutine_resume.0.dot" \
+    -o docs/processor_state_machine.svg
+dot -Tsvg "mir_dump/nrf_example.__led_controller_task-{closure#0}.-------.coroutine_resume.0.dot" \
+    -o docs/led_controller_state_machine.svg
 ```
