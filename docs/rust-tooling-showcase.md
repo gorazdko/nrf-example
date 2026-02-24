@@ -108,10 +108,10 @@ Understanding binary size is critical in embedded. Rust gives you precise visibi
 cargo size --release
 ```
 
-Example output for this project:
+Actual output for this project:
 ```
    text    data     bss     dec     hex filename
-  18432       0    8192   26624    6800 nrf-example
+  12128      80    5688   17896   45e8  nrf-example
 ```
 
 | Section | What lives there |
@@ -172,7 +172,115 @@ where you pull in HAL crates but only use a handful of peripherals.
 
 ---
 
-## 6. `cargo doc` — documentation that compiles
+## 6. RAM — how much does the app need at runtime?
+
+Without a heap, all RAM is either static (measurable at link time) or stack
+(consumed at runtime). Rust gives you exact visibility into both.
+
+### Static RAM — `cargo size` is the definitive answer
+
+From `cargo size --release` on this project:
+
+```
+text    data     bss     dec
+12128     80    5688   17896   nrf-example
+```
+
+- `.data` = **80 bytes** — initialized globals (non-zero), copied from flash to RAM on boot
+- `.bss` = **5688 bytes** — zero-initialized globals (not stored in flash, just zeroed on boot)
+- **Total static RAM: 5768 bytes** out of the 256 KB available on the nRF52840
+
+### Per-symbol breakdown — `cargo nm`
+
+```bash
+cargo nm --release -- --size-sort --print-size | sort -k2 -rh | head -15
+```
+
+Every byte of static RAM accounted for on this project:
+
+```
+4100 B  embassy_executor::ARENA        ← task arena (all task state machines)
+1024 B  defmt_rtt::BUFFER              ← RTT log ring buffer
+ 384 B  embassy_nrf::gpiote::PORT_WAKERS
+  64 B  embassy_nrf::gpiote::CHANNEL_WAKERS
+  48 B  nrf_example::TICK_CH           ← your channel (4 × u32 + bookkeeping)
+  40 B  nrf_example::CMD_CH            ← your channel (4 × LedCommand + bookkeeping)
+  24 B  embassy_nrf::time_driver::DRIVER
+```
+
+### The task arena is the biggest surprise
+
+The largest single allocation — **4100 bytes** — is the Embassy task arena.
+This is where Embassy stores the compiled **future state machines** for every task.
+When an async task suspends at `.await`, all its local variables are saved into
+this arena rather than on the call stack. The arena is statically sized by the
+feature flag in `Cargo.toml`:
+
+```toml
+embassy-executor = { version = "0.7", features = ["task-arena-size-4096", ...] }
+```
+
+Change `4096` to `512`, flash the board, and it will panic on boot with an
+out-of-memory error. Increment it until it boots cleanly — that is your true
+minimum arena size. Because this is a static allocation, there is no fragmentation
+and no runtime allocation cost: the compiler calculates each future's size and
+packs them into the arena at link time.
+
+**Key insight:** in an Embassy application, `cargo size` tells you almost the
+entire RAM story. The async model moves suspended task state out of the call
+stack and into static memory. The remaining call stack only holds the state
+of the *currently executing* code path — and since Embassy is cooperative and
+single-threaded, only one task runs at a time.
+
+### Stack depth — the harder part
+
+Static analysis of call stack depth requires extra tooling:
+
+**`stack-sizes`** — frame size per function (fast, requires nightly):
+
+```bash
+cargo install stack-sizes
+cargo +nightly rustc --release -- -Z emit-stack-sizes
+stack-sizes target/thumbv7em-none-eabihf/release/nrf-example | sort -k1 -rn | head -20
+```
+
+Shows how many bytes each function pushes onto the stack when called. Sum the
+sizes along the deepest call path to get worst-case stack usage.
+
+**`cargo-call-stack`** — full static call graph with stack annotations:
+
+```bash
+cargo install cargo-call-stack
+cargo +nightly call-stack --release > call-stack.dot
+dot -Tsvg call-stack.dot -o docs/call-stack.svg
+```
+
+Produces a call graph where each node is annotated with its local stack frame size.
+Does not handle all cases (indirect calls through function pointers or trait objects),
+but gives a reliable lower bound.
+
+**`flip-link`** — stack overflow detection at runtime (not a measurement tool, but essential):
+
+```bash
+cargo install flip-link
+```
+
+Then in `.cargo/config.toml`:
+```toml
+[target.thumbv7em-none-eabihf]
+linker = "flip-link"
+runner = "probe-rs run --chip nRF52840_xxAA"
+```
+
+`flip-link` places the stack at the *bottom* of RAM instead of the top. If the
+stack grows past its limit it hits unmapped memory and triggers a hard fault
+immediately — instead of silently overwriting your globals and causing mysterious
+corruption much later. This is the embedded equivalent of stack canaries, with
+zero runtime overhead.
+
+---
+
+## 7. `cargo doc` — documentation that compiles
 
 Every public item in your code can have doc comments (`///`). `cargo doc` builds
 a browsable HTML site from them, including all your dependencies.
@@ -194,7 +302,7 @@ cargo test --doc
 
 ---
 
-## 7. `cargo tree` — see the full dependency graph
+## 8. `cargo tree` — see the full dependency graph
 
 ```bash
 cargo tree
@@ -215,7 +323,7 @@ cargo tree --edges features
 
 ---
 
-## 8. `cargo expand` — see what macros generate
+## 9. `cargo expand` — see what macros generate
 
 Rust macros (both `macro_rules!` and proc-macros) expand to real Rust code before
 compilation. `cargo expand` shows you exactly what the compiler sees after expansion.
@@ -238,7 +346,7 @@ there is no magic, just Rust.
 
 ---
 
-## 9. `cargo audit` — security vulnerability scanning
+## 10. `cargo audit` — security vulnerability scanning
 
 ```bash
 cargo install cargo-audit
@@ -251,7 +359,7 @@ Run this in CI to catch supply-chain issues automatically.
 
 ---
 
-## 10. `rust-toolchain.toml` — reproducible environments
+## 11. `rust-toolchain.toml` — reproducible environments
 
 This file pins the exact toolchain and compilation target for the project:
 
@@ -267,7 +375,7 @@ for toolchain version mismatches.
 
 ---
 
-## 11. Putting it together — a typical workflow
+## 12. Putting it together — a typical workflow
 
 ```bash
 # Terminal 1: continuous type-check + lint on every save
@@ -293,6 +401,10 @@ cargo audit
 | cargo-watch | `cargo install cargo-watch` | `cargo watch -x check` |
 | cargo-size | `cargo install cargo-binutils` + `rustup component add llvm-tools` | `cargo size --release` |
 | cargo-bloat | `cargo install cargo-bloat` | `cargo bloat --release --crates` |
+| cargo-nm | part of cargo-binutils | `cargo nm --release -- --size-sort --print-size` |
+| stack-sizes | `cargo install stack-sizes` | `stack-sizes target/.../nrf-example` |
+| cargo-call-stack | `cargo install cargo-call-stack` | `cargo +nightly call-stack --release` |
+| flip-link | `cargo install flip-link` | set as linker in `.cargo/config.toml` |
 | cargo-expand | `cargo install cargo-expand` | `cargo expand` |
 | cargo-audit | `cargo install cargo-audit` | `cargo audit` |
 | cargo tree | built-in | `cargo tree` |
