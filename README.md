@@ -32,6 +32,13 @@ cargo build --release
 cargo run --release
 ```
 
+## Rust Ecosystem Tooling
+
+A hands-on tour of Clippy, rustfmt, cargo-watch, binary size analysis, cargo-bloat,
+cargo-expand, cargo-audit, and more — with live commands you can run on this project.
+
+See **[docs/rust-tooling-showcase.md](docs/rust-tooling-showcase.md)**.
+
 ## Async State Machines
 
 The Rust compiler transforms each `async fn` into a state machine (coroutine).
